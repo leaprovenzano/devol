@@ -2,9 +2,10 @@ import numpy as np
 import random as rand
 import math
 from keras.models import Sequential
-from keras.layers import Activation, Dense, Dropout, Flatten
+from keras.layers import Activation, Dense, Dropout, Flatten, GlobalAveragePooling2D, GlobalMaxPooling2D
 from keras.layers.convolutional import Convolution2D, MaxPooling2D
 from keras.layers.normalization import BatchNormalization
+from keras.optimizers import SGD
 from tqdm import tqdm
 
 ##################################
@@ -19,21 +20,29 @@ from tqdm import tqdm
 # self.dense_layer_shape. <optimizer> consists of just one property.
 ###################################
 
+
 class GenomeHandler:
     def __init__(self, max_conv_layers, max_dense_layers, max_filters, max_dense_nodes,
-                input_shape, n_classes, batch_normalization=True, dropout=True, max_pooling=True,
-                optimizers=None, activations=None):
+                 input_shape, n_classes, batch_normalization=True, dropout=True, max_pooling=True,
+                 optimizers=None, activations=None, metric='accuracy'):
         if max_dense_layers < 1:
-            raise ValueError("At least one dense layer is required for softmax layer") 
-        filter_range_max = int(math.log(max_filters, 2)) + 1 if max_filters > 0 else 0
+            raise ValueError(
+                "At least one dense layer is required for softmax layer")
+        filter_range_max = int(math.log(max_filters, 2)) + \
+            1 if max_filters > 0 else 0
         self.optimizer = optimizers or [
             'adam',
             'rmsprop',
             'adagrad',
-            'adadelta'
+            'adadelta',
+            'sgd',
+            'nadam',
+            SGD(lr=.001, decay=1e-6, momentum=0.9, nesterov=True)
         ]
+
         self.activation = activations or [
             'relu',
+            'elu',
             'sigmoid',
         ]
         self.convolutional_layer_shape = [
@@ -62,12 +71,17 @@ class GenomeHandler:
             # Dropout
             [(i if dropout else 0) for i in range(11)],
         ]
+
+        self.flatten_layers = [
+            GlobalAveragePooling2D(), GlobalMaxPooling2D(), Flatten()]
         self.convolution_layers = max_conv_layers
         self.convolution_layer_size = len(self.convolutional_layer_shape)
-        self.dense_layers = max_dense_layers - 1 # this doesn't include the softmax layer, so -1
+        # this doesn't include the softmax layer, so -1
+        self.dense_layers = max_dense_layers - 1
         self.dense_layer_size = len(self.dense_layer_shape)
         self.input_shape = input_shape
         self.n_classes = n_classes
+        self.metric = metric
 
     def mutate(self, genome, num_mutations):
         num_mutations = np.random.choice(num_mutations)
@@ -78,7 +92,7 @@ class GenomeHandler:
                     range_index = index % self.convolution_layer_size
                     choice_range = self.convolutional_layer_shape[range_index]
                     genome[index] = np.random.choice(choice_range)
-                elif rand.uniform(0, 1) <= 0.01: # randomly flip deactivated layers
+                elif rand.uniform(0, 1) <= 0.01:  # randomly flip deactivated layers
                     genome[index - index % self.convolution_layer_size] = 1
             elif index != len(genome) - 1:
                 offset = self.convolution_layer_size * self.convolution_layers
@@ -91,7 +105,8 @@ class GenomeHandler:
                 elif rand.uniform(0, 1) <= 0.01:
                     genome[present_index + offset] = 1
             else:
-                genome[index] = np.random.choice(list(range(len(self.optimizer)))) 
+                genome[index] = np.random.choice(
+                    list(range(len(self.optimizer))))
         return genome
 
     def decode(self, genome):
@@ -105,18 +120,19 @@ class GenomeHandler:
                 convolution = None
                 if input_layer:
                     convolution = Convolution2D(
-                                        genome[offset + 1], (3, 3),
-                                        padding='same',
-                                        input_shape=self.input_shape)
+                        genome[offset + 1], (3, 3),
+                        padding='same',
+                        input_shape=self.input_shape)
                     input_layer = False
                 else:
                     convolution = Convolution2D(
-                                        genome[offset + 1], (3, 3),
-                                        padding='same')
+                        genome[offset + 1], (3, 3),
+                        padding='same')
                 model.add(convolution)
                 if genome[offset + 2]:
                     model.add(BatchNormalization())
-                model.add(Activation(self.activation[genome[offset + 3]]))
+                _activation = self.activation[genome[offset + 3]]
+                model.add(Activation(_activation))
                 model.add(Dropout(float(genome[offset + 4] / 20.0)))
                 max_pooling_type = genome[offset + 5]
                 if max_pooling_type == 1:
@@ -124,13 +140,15 @@ class GenomeHandler:
             offset += self.convolution_layer_size
 
         if not input_layer:
-            model.add(Flatten())
+            model.add(genome[offset])  # add flatten or global pool layer
+            offset += 1
 
         for i in range(self.dense_layers):
             if genome[offset]:
                 dense = None
                 if input_layer:
-                    dense = Dense(genome[offset + 1], input_shape=self.input_shape)
+                    dense = Dense(genome[offset + 1],
+                                  input_shape=self.input_shape)
                     input_layer = False
                 else:
                     dense = Dense(genome[offset + 1])
@@ -140,11 +158,11 @@ class GenomeHandler:
                 model.add(Activation(self.activation[genome[offset + 3]]))
                 model.add(Dropout(float(genome[offset + 4] / 20.0)))
             offset += self.dense_layer_size
-        
+
         model.add(Dense(self.n_classes, activation='softmax'))
         model.compile(loss='categorical_crossentropy',
-            optimizer=self.optimizer[genome[offset]],
-            metrics=["accuracy"])
+                      optimizer=self.optimizer[genome[offset]],
+                      metrics=["accuracy"])
         return model
 
     def generate(self):
@@ -152,6 +170,7 @@ class GenomeHandler:
         for i in range(self.convolution_layers):
             for r in self.convolutional_layer_shape:
                 genome.append(np.random.choice(r))
+        genome.append(np.random.choice(self.flatten_layers))
         for i in range(self.dense_layers):
             for r in self.dense_layer_shape:
                 genome.append(np.random.choice(r))
@@ -161,7 +180,7 @@ class GenomeHandler:
 
     def is_compatible_genome(self, genome):
         expected_len = self.convolution_layers * self.convolution_layer_size \
-                        + self.dense_layers * self.dense_layer_size + 1
+            + self.dense_layers * self.dense_layer_size + 2
         if len(genome) != expected_len:
             return False
         ind = 0
@@ -170,6 +189,7 @@ class GenomeHandler:
                 if genome[ind + j] not in self.convolutional_layer_shape[j]:
                     return False
             ind += self.convolution_layer_size
+        ind+=1 #adding room for flatten  or global pooling layer
         for i in range(self.dense_layers):
             for j in range(self.dense_layer_size):
                 if genome[ind + j] not in self.dense_layer_shape[j]:
@@ -180,9 +200,9 @@ class GenomeHandler:
         return True
 
     # metric = accuracy or loss
-    def best_genome(self, csv_path, metric="accuracy", include_metrics=True):
-        best = max if metric is "accuracy" else min
-        col = -1 if metric is "accuracy" else -2
+    def best_genome(self, csv_path, include_metrics=True):
+        best = max if self.metric is "accuracy" else min
+        col = -1 if self.metric is "accuracy" else -2
         data = np.genfromtxt(csv_path, delimiter=",")
         row = list(data[:, col]).index(best(data[:, col]))
         genome = list(map(int, data[row, :-2]))
@@ -191,5 +211,5 @@ class GenomeHandler:
         return genome
 
     # metric = accuracy or loss
-    def decode_best(self, csv_path, metric="accuracy"):
+    def decode_best(self, csv_path):
         return self.decode(self.best_genome(csv_path, metric, False))
