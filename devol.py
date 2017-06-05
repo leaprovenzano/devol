@@ -51,9 +51,7 @@ class DEvol:
                     self.bssf = res
             fit.append(v)
         fit = np.array(fit)
-        print(fit)
         pop = Population(members, fit, fitness, obj=self.obj)
-        print(fit)
 
         tqdm.write("Generation 1:\t\tbest: {0:0.4f}\t\taverage: {1:0.4f}\t\tstd: {2:0.4f}\t\tbest_stats: {3}".format(self.metric_objective(fit), 
             np.mean(fit), np.std(fit), self.bssf[1:]))
@@ -128,7 +126,6 @@ class Population:
         return (fitness * 100)**4
 
     def getBest(self, n):
-        print(self.scores)
         combined = [(self.members[i], self.scores[i]) \
                 for i in range(len(self.members))]
         sorted(combined, key=(lambda x: x[1]), reverse=True)
