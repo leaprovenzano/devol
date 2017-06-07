@@ -119,6 +119,7 @@ class DEvol:
         model = self.genome_handler.decode(genome)
         if self.verbose > 1:
             model.summary()
+            print(model.optimizer)
         loss, accuracy = None, None
         model.fit(self.x_train, self.y_train, validation_data=(self.x_test, self.y_test),
                   epochs=epochs,

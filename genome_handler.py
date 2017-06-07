@@ -23,6 +23,13 @@ from tqdm import tqdm
 ###################################
 
 
+def _activation(activation):
+    # a hacky check for advanced activations
+    if type(activation) is not str:
+        return activation()
+    return Activation(activation)
+
+
 class GenomeHandler:
     def __init__(self, max_conv_layers, max_dense_layers, max_filters, max_dense_nodes,
                  input_shape, n_classes, batch_normalization=True, dropout=True, max_pooling=True,
@@ -61,6 +68,12 @@ class GenomeHandler:
             [(i if dropout else 0) for i in range(11)],
             # Max Pooling
             list(range(3)) if max_pooling else [0],
+
+            #factorize
+            [0, 1],
+
+            # kernal size
+            [1, 3, 5]
         ]
         self.dense_layer_shape = [
             # Present
@@ -75,8 +88,7 @@ class GenomeHandler:
             [(i if dropout else 0) for i in range(11)],
         ]
 
-        self.flatten_layers = [
-            GlobalAveragePooling2D(), GlobalMaxPooling2D(), Flatten()]
+        self.flatten_layers = [GlobalAveragePooling2D(), GlobalMaxPooling2D(), Flatten()]
         self.convolution_layers = max_conv_layers
         self.convolution_layer_size = len(self.convolutional_layer_shape)
         # this doesn't include the softmax layer, so -1
@@ -94,12 +106,14 @@ class GenomeHandler:
                 if genome[index - index % self.convolution_layer_size]:
                     range_index = index % self.convolution_layer_size
                     choice_range = self.convolutional_layer_shape[range_index]
-                    genome[index] = np.random.choice(choice_range)
+                    # genome[index] = np.random.choice(choice_range)
+                    genome[index] = rand.choice(choice_range)
+
                 elif rand.uniform(0, 1) <= 0.01:  # randomly flip deactivated layers
                     genome[index - index % self.convolution_layer_size] = 1
 
             elif index == (self.convolution_layer_size * self.convolution_layers) + 1:
-                genome[index] = np.random.choice(
+                genome[index] = rand.choice(
                     [v for v in range(len(self.flatten_layers)) if v != genome[index]])
 
             elif index != len(genome) - 1:
@@ -110,42 +124,45 @@ class GenomeHandler:
                 if genome[present_index + offset]:
                     range_index = new_index % self.dense_layer_size
                     choice_range = self.dense_layer_shape[range_index]
-                    genome[index] = np.random.choice(choice_range)
+                    genome[index] = rand.choice(choice_range)
                 elif rand.uniform(0, 1) <= 0.01:
                     genome[present_index + offset] = 1
             else:
-                genome[index] = np.random.choice(
+                genome[index] = rand.choice(
                     list(range(len(self.optimizer))))
         return genome
+
 
     def build_conv(self, encoding, kernal_size=(3, 3), scale_drop=.05):
         """build a basic convolutional layer according
         to parameters defined in encoding.
         """
-        _, filters, bn, activation_index, drop, pool = encoding
+        _, filters, bn, activation_index, drop, pool, factorize, ksize = encoding
         activation = self.activation[activation_index]
 
         def block(inp):
-            x = Conv2D(filters, kernal_size, padding='same')(inp)
+            if factorize and ksize > 1:
+                x = Conv2D(filters, (ksize, 1), padding='same')(inp)
+                if bn:
+                    x = BatchNormalization()(x)
+                _activation(activation)(x)
+                x = Conv2D(filters, (1, ksize), padding='same')(x)
+            else:
+                x = Conv2D(filters, (ksize, ksize), padding='same')(inp)
+
             if bn:
                 x = BatchNormalization()(x)
-
-            # a hacky check for advanced activations
-            if type(activation) is not str:
-                x = activation()(x)
-            else:
-                x = Activation(activation)(x)
+            _activation(activation)(x)
             x = Dropout(drop * scale_drop)(x)
             if pool == 1:
                 x = MaxPooling2D(pool_size=(2, 2), padding="same")(x)
-
-            elif pool == 2: #pool using convolution with stride of 2
+            elif pool == 2:  # pool using convolution with stride of 2
                 x = Conv2D(filters, kernal_size, strides=(
                     2, 2), padding='same')(inp)
             return x
         return block
 
-    def build_dense(self, encoding, scale_drop=.07):
+    def build_dense(self, encoding, scale_drop=.08):
         """build a basic dense layer according
         to parameters defined in encoding.
         """
@@ -156,11 +173,7 @@ class GenomeHandler:
             x = Dense(nodes)(inp)
             if bn:
                 x = BatchNormalization()(x)
-            # a hacky check for advanced activations
-            if type(activation) is not str:
-                x = activation()(x)
-            else:
-                x = Activation(activation)(x)
+            _activation(activation)(x)
             x = Dropout(drop * scale_drop)(x)
             return x
 
@@ -169,7 +182,6 @@ class GenomeHandler:
     def decode(self, genome):
         if not self.is_compatible_genome(genome):
             raise ValueError("Invalid genome for specified configs")
-            
         # initilize input layer
         input_layer = Input(shape=self.input_shape)
         x = input_layer  # set cursor to input layer so we don't have to bother checking
@@ -181,11 +193,10 @@ class GenomeHandler:
                 x = self.build_conv(params)(x)
 
         # add out flatten or global pooling layer
-        ix = (self.convolution_layers * self.convolution_layer_size) + 1
+        ix = (self.convolution_layers * self.convolution_layer_size)
         x = self.flatten_layers[genome[ix]](x)
-
         # add dense layers
-        for i in range(ix, ix + (self.dense_layer_size * self.dense_layers), self.dense_layer_size):
+        for i in range(ix+1, ix+1 + (self.dense_layer_size * self.dense_layers), self.dense_layer_size):
             params = genome[i:i + self.dense_layer_size]
             if params[0]:
                 x = self.build_dense(params)(x)
@@ -202,21 +213,23 @@ class GenomeHandler:
         genome = []
         for i in range(self.convolution_layers):
             for r in self.convolutional_layer_shape:
-                genome.append(np.random.choice(r))
-        genome.append(np.random.choice(range(len(self.flatten_layers))))
+                # genome.append(np.random.choice(r))
+                genome.append(rand.choice(r))
+
+        genome.append(rand.randint(0, len(self.flatten_layers)-1))
         for i in range(self.dense_layers):
             for r in self.dense_layer_shape:
-                genome.append(np.random.choice(r))
-        genome.append(np.random.choice(list(range(len(self.optimizer)))))
-        genome[0] = 1
+                genome.append(rand.choice(r))
+        genome.append(rand.choice(range(len(self.optimizer))))
+        genome[0]=1
         return genome
 
+
     def is_compatible_genome(self, genome):
-        expected_len = self.convolution_layers * self.convolution_layer_size \
-            + self.dense_layers * self.dense_layer_size + 2
+        expected_len=self.convolution_layers * self.convolution_layer_size + self.dense_layers * self.dense_layer_size + 2
         if len(genome) != expected_len:
             return False
-        ind = 0
+        ind=0
         for i in range(self.convolution_layers):
             for j in range(self.convolution_layer_size):
                 if genome[ind + j] not in self.convolutional_layer_shape[j]:
@@ -237,11 +250,11 @@ class GenomeHandler:
 
     # metric = accuracy or loss
     def best_genome(self, csv_path, metric='accuracy', include_metrics=True):
-        best = max if metric is "accuracy" else min
-        col = -1 if metric is "accuracy" else -2
-        data = np.genfromtxt(csv_path, delimiter=",")
-        row = list(data[:, col]).index(best(data[:, col]))
-        genome = list(map(int, data[row, :-2]))
+        best=max if metric is "accuracy" else min
+        col=-1 if metric is "accuracy" else -2
+        data=np.genfromtxt(csv_path, delimiter=",")
+        row=list(data[:, col]).index(best(data[:, col]))
+        genome=list(map(int, data[row, :-2]))
         if include_metrics:
             genome += list(data[row, -2:])
         return genome
