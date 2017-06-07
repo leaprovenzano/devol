@@ -219,7 +219,7 @@ class GenomeHandler:
         x = self.flatten_layers[genome[ix]](x)
         ix+=1
         # add dense layers
-        for i in range(ix, len(genome), self.dense_layer_size):
+        for i in range(ix, ix+ (self.dense_layer_size * self.dense_layers), self.dense_layer_size):
             params = genome[i:i + self.dense_layer_size]
             if params[0]:
                 x = self.build_dense(params)(x)
