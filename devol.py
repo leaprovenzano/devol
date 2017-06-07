@@ -6,7 +6,7 @@ import numpy as np
 from keras.models import Sequential
 from keras.utils import np_utils
 from keras.datasets import mnist, cifar10
-from keras.callbacks import EarlyStopping
+from keras.callbacks import EarlyStopping, ReduceLROnPlateau
 from datetime import datetime
 import random as rand
 import csv
@@ -25,17 +25,10 @@ class DEvol:
         self.datafile = data_path or (datetime.now().ctime() + '.csv')
         self.bssf = (None, float('inf'), 0.)  # model, loss, accuracy
         self.verbose = 0
-
         print("Genome encoding and accuracy data stored at", self.datafile, "\n")
 
     def set_objective(self, metric: str):
-        """set the metric and objective for this search 
-
-        Args:
-            metric (str): a metric to oprimize should be "accuracy" or "loss"
-
-        Raises:
-            ValueError: raise if an unexpeceted metric is encountered.
+        """set the metric and objective for this search should be "accuracy" or "loss"
         """
         if metric is 'acc':
             metric = 'accuracy'
@@ -48,9 +41,8 @@ class DEvol:
         self.metric_op = METRIC_OPS[self.objective is 'max']
         self.metric_objective = METRIC_OBJECTIVES[self.objective is 'max']
 
-    # Create a population and evolve
-    # Returns best model found in the form of (model, loss, accuracy)
-    def run(self, dataset, num_generations: int, pop_size: int, epochs: int, fitness=None, verbose=0, metric='accuracy'):
+
+    def run(self, dataset, num_generations: int, pop_size: int, epochs: int, fitness=None, verbose=0, metric='accuracy', reduce_lr=False):
         """run genetic search on dataset given number of generations and population size
 
         Args:
@@ -71,6 +63,7 @@ class DEvol:
             (keras model, float, float ): best model found in the form of (model, loss, accuracy)
         """
         self.verbose = verbose
+        self.reduce_lr = reduce_lr
         self.set_objective(metric)
         generations = trange(num_generations, desc="Generations")
         (self.x_train, self.y_train), (self.x_test, self.y_test) = dataset
@@ -110,7 +103,6 @@ class DEvol:
                 fit.append(v)
             fit = np.array(fit)
             pop = Population(members, fit, fitness, obj=self.objective)
-
             tqdm.write("Generation {3}:\t\tbest {4}: {0:0.4f}\t\taverage: {1:0.4f}\t\tstd: {2:0.4f}".format(self.metric_objective(fit),
                                                                                                             np.mean(fit), np.std(fit), gen + 1, self.metric))
         return self.bssf
@@ -121,10 +113,13 @@ class DEvol:
             model.summary()
             print(model.optimizer)
         loss, accuracy = None, None
+        callbacks=[EarlyStopping(monitor='val_loss', patience=1, verbose=0)]
+        if self.reduce_lr:
+            callbacks.append(ReduceLROnPlateau(monitor='val_loss', patience=0, factor=.5, verbose=self.verbose>=1))
         model.fit(self.x_train, self.y_train, validation_data=(self.x_test, self.y_test),
                   epochs=epochs,
                   verbose=self.verbose > 0,
-                  callbacks=[EarlyStopping(monitor='val_loss', patience=1, verbose=0)])
+                  callbacks=callbacks)
         loss, accuracy = model.evaluate(self.x_test, self.y_test, verbose=0)
         # Record the stats
         with open(self.datafile, 'a') as csvfile:
