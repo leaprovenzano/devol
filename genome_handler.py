@@ -30,6 +30,43 @@ def _activation(activation):
     return Activation(activation)
 
 
+def conv_layer(filters, kernal_size, activation, bn, strides=(1, 1)):
+    def clayer(inp):
+        x = Conv2D(filters, kernal_size, strides=strides, padding='same')(inp)
+        if bn:
+            x = BatchNormalization()(x)
+        x = _activation(activation)(x)
+        return x
+    return clayer
+
+def factorized_conv(filters, ksize, activation, bn, strides=(1, 1)):
+    def block(inp):
+        x = conv_layer(filters, (1, ksize), activation, bn, strides)(inp)
+        x = conv_layer(filters, (ksize, 1), activation, bn, strides)(x)
+        return x
+    return block
+
+def conv_block(n_layers, pooling, dropout, factorize, filters, ksize, activation, bn, strides=(1, 1)):
+    if factorize:
+        builder = factorized_conv
+    else:
+        builder = conv_layer
+
+    def block(inp):
+        x = inp
+        for i in range(n_layers):
+            x = builder(filters, ksize, activation, bn, strides)(x)
+        x = Dropout(dropout)(x)
+
+        if pooling == 1:
+            x = MaxPooling2D(pool_size=(2, 2), padding="same")(x)
+        elif pooling == 2:  # pool using convolution with stride of 2
+            x = Conv2D(filters, (3, 3), strides=(
+                2, 2), padding='same')(x)
+        return x
+    return block
+
+
 class GenomeHandler:
     def __init__(self, max_conv_layers, max_dense_layers, max_filters, max_dense_nodes,
                  input_shape, n_classes, batch_normalization=True, dropout=True, max_pooling=True,
@@ -73,7 +110,9 @@ class GenomeHandler:
             [0, 1],
 
             # kernal size
-            [1, 3, 5]
+            [1, 3, 5],
+            #layers per block
+            [1, 2, 3]
         ]
         self.dense_layer_shape = [
             # Present
@@ -112,7 +151,7 @@ class GenomeHandler:
                 elif rand.uniform(0, 1) <= 0.01:  # randomly flip deactivated layers
                     genome[index - index % self.convolution_layer_size] = 1
 
-            elif index == (self.convolution_layer_size * self.convolution_layers) + 1:
+            elif index == (self.convolution_layer_size * self.convolution_layers) :
                 genome[index] = rand.choice(
                     [v for v in range(len(self.flatten_layers)) if v != genome[index]])
 
@@ -133,34 +172,17 @@ class GenomeHandler:
         return genome
 
 
+
     def build_conv(self, encoding, kernal_size=(3, 3), scale_drop=.05):
         """build a basic convolutional layer according
         to parameters defined in encoding.
         """
-        _, filters, bn, activation_index, drop, pool, factorize, ksize = encoding
+        _, filters, bn, activation_index, drop, pool, factorize, ksize, n_layers = encoding
         activation = self.activation[activation_index]
+        return conv_block(n_layers, pool, drop*scale_drop, 
+                          factorize, filters, ksize, activation, bn)
 
-        def block(inp):
-            if factorize and ksize > 1:
-                x = Conv2D(filters, (ksize, 1), padding='same')(inp)
-                if bn:
-                    x = BatchNormalization()(x)
-                _activation(activation)(x)
-                x = Conv2D(filters, (1, ksize), padding='same')(x)
-            else:
-                x = Conv2D(filters, (ksize, ksize), padding='same')(inp)
 
-            if bn:
-                x = BatchNormalization()(x)
-            _activation(activation)(x)
-            x = Dropout(drop * scale_drop)(x)
-            if pool == 1:
-                x = MaxPooling2D(pool_size=(2, 2), padding="same")(x)
-            elif pool == 2:  # pool using convolution with stride of 2
-                x = Conv2D(filters, kernal_size, strides=(
-                    2, 2), padding='same')(inp)
-            return x
-        return block
 
     def build_dense(self, encoding, scale_drop=.08):
         """build a basic dense layer according
@@ -173,7 +195,7 @@ class GenomeHandler:
             x = Dense(nodes)(inp)
             if bn:
                 x = BatchNormalization()(x)
-            _activation(activation)(x)
+            x = _activation(activation)(x)
             x = Dropout(drop * scale_drop)(x)
             return x
 
@@ -195,8 +217,9 @@ class GenomeHandler:
         # add out flatten or global pooling layer
         ix = (self.convolution_layers * self.convolution_layer_size)
         x = self.flatten_layers[genome[ix]](x)
+        ix+=1
         # add dense layers
-        for i in range(ix+1, ix+1 + (self.dense_layer_size * self.dense_layers), self.dense_layer_size):
+        for i in range(ix, len(genome), self.dense_layer_size):
             params = genome[i:i + self.dense_layer_size]
             if params[0]:
                 x = self.build_dense(params)(x)
