@@ -6,9 +6,12 @@ from keras.layers import Activation, Dense, Dropout, Flatten, GlobalAveragePooli
 from keras.layers.convolutional import Conv2D, MaxPooling2D
 from keras.layers.normalization import BatchNormalization
 from keras.layers.advanced_activations import LeakyReLU, PReLU
+from keras.layers import add
+from keras import backend as K
 
 from keras.optimizers import SGD
 from tqdm import tqdm
+
 
 ##################################
 # Genomes are represented as fixed-with lists of integers corresponding
@@ -22,6 +25,11 @@ from tqdm import tqdm
 # self.dense_layer_shape. <optimizer> consists of just one property.
 ###################################
 
+if K.image_data_format() == 'channels_last':
+    CHANNEL_AXIS = -1
+else:
+    CHANNEL_AXIS = 1
+
 
 def _activation(activation):
     # a hacky check for advanced activations
@@ -30,23 +38,58 @@ def _activation(activation):
     return Activation(activation)
 
 
-def conv_layer(filters, kernal_size, activation, bn, strides=(1, 1)):
+def conv_layer(filters, kernal_size, activation, bn, strides=(1, 1), omit_activation=False):
     def clayer(inp):
         x = Conv2D(filters, kernal_size, strides=strides, padding='same')(inp)
         if bn:
-            x = BatchNormalization()(x)
-        x = _activation(activation)(x)
+            x = BatchNormalization(axis=CHANNEL_AXIS)(x)
+        if not omit_activation:
+            x = _activation(activation)(x)
         return x
     return clayer
 
-def factorized_conv(filters, ksize, activation, bn, strides=(1, 1)):
+def factorized_conv(filters, ksize, activation, bn, strides=(1, 1), omit_activation=False):
     def block(inp):
         x = conv_layer(filters, (1, ksize), activation, bn, strides)(inp)
-        x = conv_layer(filters, (ksize, 1), activation, bn, strides)(x)
+        x = conv_layer(filters, (ksize, 1), activation, bn, strides, omit_activation=omit_activation)(x)
         return x
     return block
 
-def conv_block(n_layers, pooling, dropout, factorize, filters, ksize, activation, bn, strides=(1, 1)):
+
+
+
+def res_block(n_layers, pooling, dropout, factorize, filters, ksize, activation, bn, strides=(1, 1)):
+    if factorize:
+        builder = factorized_conv
+    else:
+        builder = conv_layer
+
+    def block(inp):
+        # in_filters = inp._keras_shape[CHANNEL_AXIS]
+
+        x1 = conv_layer(filters, 1, activation, bn, strides)(inp)
+
+        x= inp
+        for i in range(n_layers-1):
+            x = builder(filters, ksize, activation, bn, strides)(x)
+        x = builder(filters, ksize, activation, bn, strides, omit_activation=True)(x)
+        x = add([x, x1])
+        x = _activation(activation)(x)
+
+        x = Dropout(dropout)(x)
+        if pooling == 1:
+            x = MaxPooling2D(pool_size=(2, 2), padding="same")(x)
+        elif pooling == 2:  # pool using convolution with stride of 2
+            x = conv_layer(filters, 3, activation, bn, strides=(2, 2))(x)
+        return x
+
+    return block  
+
+
+
+def conv_block(n_layers, pooling, dropout, factorize, filters, ksize, activation, bn, strides=(1, 1), residual=False):
+    if residual:
+        return res_block(n_layers, pooling, dropout, factorize, filters, ksize, activation, bn, strides=(1, 1))
     if factorize:
         builder = factorized_conv
     else:
@@ -61,44 +104,46 @@ def conv_block(n_layers, pooling, dropout, factorize, filters, ksize, activation
         if pooling == 1:
             x = MaxPooling2D(pool_size=(2, 2), padding="same")(x)
         elif pooling == 2:  # pool using convolution with stride of 2
-            x = Conv2D(filters, (3, 3), strides=(
-                2, 2), padding='same')(x)
+            x = conv_layer(filters, 3, activation, bn, strides=(2, 2))(x)
+
         return x
     return block
 
+ADV_ACTIVATIONS = {'prelu': PReLU, 'leakyrelu': LeakyReLU}
+OPTIMIZERS = ['adam', 'rmsprop', 'adagrad', 'adadelta', 'sgd', 'nadam', SGD(lr=.01, decay=1e-6, momentum=0.9, nesterov=True)]
+ACTIVATIONS = ['relu', 'elu', 'sigmoid', LeakyReLU, PReLU]
+SPATIAL_TRANS_LAYERS = [GlobalAveragePooling2D, GlobalMaxPooling2D, Flatten]
+
+
+
+def activation_by_name(n):
+    try:
+        return ADV_ACTIVATIONS[n]
+    except KeyError:
+        return n
+
+
 
 class GenomeHandler:
-    def __init__(self, max_conv_layers, max_dense_layers, max_filters, max_dense_nodes,
+    def __init__(self, max_blocks, max_dense_layers, max_filters, max_dense_nodes,
                  input_shape, n_classes, batch_normalization=True, dropout=True, max_pooling=True,
-                 optimizers=None, activations=None):
+                 optimizers=OPTIMIZERS, activations=ACTIVATIONS, spatial_transformation_layers= SPATIAL_TRANS_LAYERS,
+                 factorize=True, kernal_size = [1, 3, 5], layers_per_block=[1, 2, 3], residual_layers=True):
+
         if max_dense_layers < 1:
             raise ValueError(
                 "At least one dense layer is required for softmax layer")
         filter_range_max = int(math.log(max_filters, 2)) + int(max_filters > 0)
-        self.optimizer = optimizers or [
-            'adam',
-            'rmsprop',
-            'adagrad',
-            'adadelta',
-            'sgd',
-            'nadam',
-            SGD(lr=.001, decay=1e-6, momentum=0.9, nesterov=True)
-        ]
+        self.optimizer = optimizers
+        self.activation = list(map(activation_by_name, activations))
 
-        self.activation = activations or [
-            'relu',
-            'elu',
-            'sigmoid',
-            LeakyReLU,
-            PReLU
-        ]
         self.convolutional_layer_shape = [
             # Present
             [0, 1],
             # Filters
             [2**i for i in range(3, filter_range_max)],
             # Batch Normalization
-            [0, (1 if batch_normalization else 0)],
+            [0, int(batch_normalization)],
             # Activation
             list(range(len(self.activation))),
             # Dropout
@@ -107,28 +152,32 @@ class GenomeHandler:
             list(range(3)) if max_pooling else [0],
 
             #factorize
-            [0, 1],
+            [0, int(factorize)],
 
             # kernal size
-            [1, 3, 5],
+            kernal_size,
             #layers per block
-            [1, 2, 3]
+            layers_per_block,
+
+            #residual layers
+            [0, int(residual_layers)]
         ]
+
         self.dense_layer_shape = [
             # Present
             [0, 1],
             # Number of Nodes
             [2**i for i in range(4, int(math.log(max_dense_nodes, 2)) + 1)],
             # Batch Normalization
-            [0, (1 if batch_normalization else 0)],
+            [0, int(batch_normalization)],
             # Activation
             list(range(len(self.activation))),
             # Dropout
             [(i if dropout else 0) for i in range(11)],
         ]
 
-        self.flatten_layers = [GlobalAveragePooling2D(), GlobalMaxPooling2D(), Flatten()]
-        self.convolution_layers = max_conv_layers
+        self.spatial_transformation_layers = spatial_transformation_layers
+        self.convolution_layers = max_blocks
         self.convolution_layer_size = len(self.convolutional_layer_shape)
         # this doesn't include the softmax layer, so -1
         self.dense_layers = max_dense_layers - 1
@@ -153,7 +202,7 @@ class GenomeHandler:
 
             elif index == (self.convolution_layer_size * self.convolution_layers) :
                 genome[index] = rand.choice(
-                    [v for v in range(len(self.flatten_layers)) if v != genome[index]])
+                    [v for v in range(len(self.spatial_transformation_layers)) if v != genome[index]])
 
             elif index != len(genome) - 1:
                 offset = (self.convolution_layer_size *
@@ -177,10 +226,10 @@ class GenomeHandler:
         """build a basic convolutional layer according
         to parameters defined in encoding.
         """
-        _, filters, bn, activation_index, drop, pool, factorize, ksize, n_layers = encoding
+        _, filters, bn, activation_index, drop, pool, factorize, ksize, n_layers, residual = encoding
         activation = self.activation[activation_index]
         return conv_block(n_layers, pool, drop*scale_drop, 
-                          factorize, filters, ksize, activation, bn)
+                          factorize, filters, ksize, activation, bn, residual=residual)
 
 
 
@@ -216,7 +265,7 @@ class GenomeHandler:
 
         # add out flatten or global pooling layer
         ix = (self.convolution_layers * self.convolution_layer_size)
-        x = self.flatten_layers[genome[ix]](x)
+        x = self.spatial_transformation_layers[genome[ix]]()(x)
         ix+=1
         # add dense layers
         for i in range(ix, ix+ (self.dense_layer_size * self.dense_layers), self.dense_layer_size):
@@ -239,12 +288,13 @@ class GenomeHandler:
                 # genome.append(np.random.choice(r))
                 genome.append(rand.choice(r))
 
-        genome.append(rand.randint(0, len(self.flatten_layers)-1))
+        genome.append(rand.randint(0, len(self.spatial_transformation_layers)-1))
         for i in range(self.dense_layers):
             for r in self.dense_layer_shape:
                 genome.append(rand.choice(r))
         genome.append(rand.choice(range(len(self.optimizer))))
         genome[0]=1
+        genome[9]=0
         return genome
 
 
@@ -259,7 +309,7 @@ class GenomeHandler:
                     return False
             ind += self.convolution_layer_size
         ind += 1  # adding room for flatten  or global pooling layer
-        if genome[ind] not in range(len(self.flatten_layers)):
+        if genome[ind] not in range(len(self.spatial_transformation_layers)):
             return False
         for i in range(self.dense_layers):
             for j in range(self.dense_layer_size):
