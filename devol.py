@@ -66,7 +66,7 @@ class DEvol:
         self.reduce_lr = reduce_lr
         self.set_objective(metric)
         generations = trange(num_generations, desc="Generations")
-        (self.x_train, self.y_train), (self.x_test, self.y_test) = dataset
+        self.train, self.test = dataset
         # Generate initial random population
         members = [self.genome_handler.generate() for _ in range(pop_size)]
         fit = []
@@ -116,11 +116,21 @@ class DEvol:
         callbacks=[EarlyStopping(monitor='val_loss', patience=1, verbose=0)]
         if self.reduce_lr:
             callbacks.append(ReduceLROnPlateau(monitor='val_loss', patience=0, factor=.5, verbose=self.verbose>=1))
-        model.fit(self.x_train, self.y_train, validation_data=(self.x_test, self.y_test),
-                  epochs=epochs,
-                  verbose=self.verbose > 0,
-                  callbacks=callbacks)
-        loss, accuracy = model.evaluate(self.x_test, self.y_test, verbose=0)
+        if self.train is tuple: #its a tuple of arrays of static data
+            model.fit(*self.train, validation_data=self.test,
+                      epochs=epochs,
+                      verbose=self.verbose > 0,
+                      callbacks=callbacks)
+
+        else: # its some generator that we call fit_generator on...
+            model.fit_generator(self.train, validation_data=self.test,
+                      epochs=epochs,
+                      steps_per_epoch= self.train.n//self.train.batch_size,
+                      verbose=self.verbose > 0,
+                      callbacks=callbacks)
+
+
+        loss, accuracy = model.evaluate(*self.test, verbose=0)
         # Record the stats
         with open(self.datafile, 'a') as csvfile:
             writer = csv.writer(csvfile, delimiter=',',
